@@ -336,16 +336,25 @@ async def relay(message, matched):
         state, reply_author_id, reply_message_id = await resolve_reply_target(message)
 
         files = await collect_attachments(message)
-        if files is None:
-            return
-
+        
+        # ============================================================
+        # If there's a matched word, relay the text + attachments
+        # If there's no matched word but there ARE attachments, relay ONLY the attachments
+        # ============================================================
         body = message.content or ""
-        fwd = forwarded_text(message)
-        if fwd:
-            quoted = "\n".join("> " + line for line in fwd.splitlines())
-            body = f"{body}\n{quoted}" if body else quoted
-        if message.stickers:
-            body += "\n*(stickers: " + ", ".join(s.name for s in message.stickers) + ")*"
+        has_attachments = bool(message.attachments)
+        
+        # If there's no bad word but there are attachments, don't show text
+        if not matched and has_attachments:
+            body = ""
+        else:
+            fwd = forwarded_text(message)
+            if fwd:
+                quoted = "\n".join("> " + line for line in fwd.splitlines())
+                body = f"{body}\n{quoted}" if body else quoted
+            if message.stickers:
+                body += "\n*(stickers: " + ", ".join(s.name for s in message.stickers) + ")*"
+        # ============================================================
 
         # ============================================================
         # FETCH ONLY THE IMMEDIATE PARENT (NOT THE FULL CHAIN)
@@ -359,7 +368,6 @@ async def relay(message, matched):
                 original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
                 
-                # Check if the parent was ALSO a reply — if so, we don't fetch its parent
                 if original_msg.reference and original_msg.reference.message_id:
                     original_content = f"(replying to another message) {original_content}"
             except (discord.NotFound, discord.HTTPException):
@@ -377,14 +385,26 @@ async def relay(message, matched):
         # ============================================================
         final_content = ""
         
-        if state == "known" and reply_author_id:
-            final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
-        elif state == "deleted":
-            final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"
-        elif state == "unknown":
-            final_content = f"**[Message could not be fetched]**\n\n**{message.author.display_name}:** {body}"
+        if matched:
+            # Normal relay with filtered word
+            if state == "known" and reply_author_id:
+                final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
+            elif state == "deleted":
+                final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"
+            elif state == "unknown":
+                final_content = f"**[Message could not be fetched]**\n\n**{message.author.display_name}:** {body}"
+            else:
+                final_content = body
         else:
-            final_content = body
+            # No filtered word — just show "sent an image/video" with attachments
+            if state == "known" and reply_author_id:
+                final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}** sent:"
+            elif state == "deleted":
+                final_content = f"**[Deleted message]**\n\n**{message.author.display_name}** sent:"
+            elif state == "unknown":
+                final_content = f"**[Message could not be fetched]**\n\n**{message.author.display_name}** sent:"
+            else:
+                final_content = f"**{message.author.display_name}** sent:"
 
         # ============================================================
         # SPAM CHECK
@@ -413,7 +433,7 @@ async def relay(message, matched):
             log.exception("could not get/create webhook in #%s", message.channel)
             try:
                 await message.channel.send(
-                    f"📨 {message.author.display_name} said:\n{final_content}",
+                    f"📨 {message.author.display_name} sent:" if not matched else f"📨 {message.author.display_name} said:\n{final_content}",
                     files=files,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
@@ -422,7 +442,7 @@ async def relay(message, matched):
                 log.exception("fallback send also failed")
             return
 
-        # Send via webhook — NO DELAY for speed!
+        # Send via webhook
         try:
             await webhook.send(
                 content=final_content,
@@ -435,7 +455,7 @@ async def relay(message, matched):
             log.exception("failed to send relay via webhook")
             try:
                 await message.channel.send(
-                    f"📨 {message.author.display_name} said:\n{final_content}",
+                    f"📨 {message.author.display_name} sent:" if not matched else f"📨 {message.author.display_name} said:\n{final_content}",
                     files=files,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
@@ -450,7 +470,7 @@ async def relay(message, matched):
             pass
         except (discord.Forbidden, discord.HTTPException):
             log.exception("relayed but could not delete the original in #%s", message.channel)
-        log.info("relayed a message from %s (matched %r)", message.author, matched)
+        log.info("relayed a message from %s (matched %r, attachments=%s)", message.author, matched, has_attachments)
 
 
 def authorized():
@@ -480,9 +500,17 @@ async def on_message(message):
         return
     if message.content.startswith(PREFIX):
         return
+    
+    # ============================================================
+    # CHECK FOR FILTERED WORDS OR ATTACHMENTS
+    # ============================================================
     matched = store.find(scannable_text(message))
-    if matched:
+    has_attachments = bool(message.attachments)
+    
+    # Relay if: (message has a bad word) OR (message has images/videos)
+    if matched or has_attachments:
         await relay(message, matched)
+    # ============================================================
 
 
 @bot.event

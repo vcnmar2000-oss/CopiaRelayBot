@@ -32,14 +32,13 @@ DENIAL_COOLDOWN = 30.0
 # SPAM TRACKING — catches users who spam filtered words
 # ============================================================
 spam_tracker = defaultdict(list)
-SPAM_WINDOW = 180   # 3 minutes (more forgiving)
-SPAM_LIMIT = 10     # 10 filtered messages per 3 minutes (less strict)
-TIMEOUT_MINUTES = 3 # 3-minute timeout for spammers
+SPAM_WINDOW = 180   # 3 minutes
+SPAM_LIMIT = 10     # 10 filtered messages per 3 minutes
+TIMEOUT_MINUTES = 3 # 3-minute timeout
 
 def is_spamming(user_id):
     """Returns True if user has exceeded the spam limit."""
     now = time.time()
-    # Clean old entries
     spam_tracker[user_id] = [t for t in spam_tracker[user_id] if now - t < SPAM_WINDOW]
     
     if len(spam_tracker[user_id]) >= SPAM_LIMIT:
@@ -349,7 +348,7 @@ async def relay(message, matched):
             body += "\n*(stickers: " + ", ".join(s.name for s in message.stickers) + ")*"
 
         # ============================================================
-        # FETCH THE ORIGINAL MESSAGE CONTENT
+        # FETCH ONLY THE IMMEDIATE PARENT (NOT THE FULL CHAIN)
         # ============================================================
         original_content = ""
         original_author = ""
@@ -359,6 +358,10 @@ async def relay(message, matched):
                 original_msg = await message.channel.fetch_message(reply_message_id)
                 original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
+                
+                # Check if the parent was ALSO a reply — if so, we don't fetch its parent
+                if original_msg.reference and original_msg.reference.message_id:
+                    original_content = f"(replying to another message) {original_content}"
             except (discord.NotFound, discord.HTTPException):
                 original_content = "[Message could not be fetched]"
                 original_author = "Unknown user"
@@ -370,24 +373,21 @@ async def relay(message, matched):
             original_author = "Unknown user"
 
         # ============================================================
-        # BUILD THE FINAL MESSAGE WITH QUOTED CONTEXT
+        # BUILD CLEAN, COMPACT REPLY FORMAT
         # ============================================================
         final_content = ""
         
         if state == "known" and reply_author_id:
-            final_content = f"> **@{original_author}** said:\n"
-            for line in original_content.split("\n"):
-                final_content += f"> {line}\n"
-            final_content += f"\n**{message.author.display_name}** replied:\n{body}"
+            final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
         elif state == "deleted":
-            final_content = f"> **[Deleted message]** \n\n**{message.author.display_name}** replied:\n{body}"
+            final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"
         elif state == "unknown":
-            final_content = f"> **[Message could not be fetched]** \n\n**{message.author.display_name}** replied:\n{body}"
+            final_content = f"**[Message could not be fetched]**\n\n**{message.author.display_name}:** {body}"
         else:
             final_content = body
 
         # ============================================================
-        # SPAM CHECK — runs AFTER building the reply context
+        # SPAM CHECK
         # ============================================================
         if is_spamming(message.author.id):
             try:
@@ -422,13 +422,7 @@ async def relay(message, matched):
                 log.exception("fallback send also failed")
             return
 
-        # ============================================================
-        # ADD DELAY TO PREVENT WICK QUARANTINE
-        # ============================================================
-        await asyncio.sleep(0.5)
-        # ============================================================
-
-        # Send via webhook
+        # Send via webhook — NO DELAY for speed!
         try:
             await webhook.send(
                 content=final_content,

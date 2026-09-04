@@ -29,7 +29,7 @@ MAX_RELAY_BYTES = 25 * 1024 * 1024
 DENIAL_COOLDOWN = 30.0
 
 # ============================================================
-# SPAM TRACKING — catches users who spam filtered words
+# SPAM TRACKING — optimized for speed
 # ============================================================
 spam_tracker = defaultdict(list)
 SPAM_WINDOW = 180   # 3 minutes
@@ -39,7 +39,12 @@ TIMEOUT_MINUTES = 3 # 3-minute timeout
 def is_spamming(user_id):
     """Returns True if user has exceeded the spam limit."""
     now = time.time()
-    spam_tracker[user_id] = [t for t in spam_tracker[user_id] if now - t < SPAM_WINDOW]
+    # Fast cleanup
+    user_times = spam_tracker.get(user_id)
+    if user_times:
+        # Only clean if we need to
+        cutoff = now - SPAM_WINDOW
+        spam_tracker[user_id] = [t for t in user_times if t > cutoff]
     
     if len(spam_tracker[user_id]) >= SPAM_LIMIT:
         return True
@@ -333,81 +338,77 @@ async def relay(message, matched):
         return
 
     async with channel_lock(message.channel.id):
+        # ============================================================
+        # FAST PATH: Check if it's a reply
+        # ============================================================
         state, reply_author_id, reply_message_id = await resolve_reply_target(message)
 
-        files = await collect_attachments(message)
-        
         # ============================================================
-        # If there's a matched word, relay the text + attachments
-        # If there's no matched word but there ARE attachments, relay ONLY the attachments
+        # COLLECT ATTACHMENTS (if any)
+        # ============================================================
+        files = await collect_attachments(message)
+        if files is None:
+            return
+
+        # ============================================================
+        # BUILD BODY TEXT
         # ============================================================
         body = message.content or ""
         has_attachments = bool(message.attachments)
         
-        # If there's no bad word but there are attachments, don't show text
-        if not matched and has_attachments:
-            body = ""
-        else:
+        if matched and not has_attachments:
+            # Normal text with bad word
             fwd = forwarded_text(message)
             if fwd:
                 quoted = "\n".join("> " + line for line in fwd.splitlines())
                 body = f"{body}\n{quoted}" if body else quoted
             if message.stickers:
                 body += "\n*(stickers: " + ", ".join(s.name for s in message.stickers) + ")*"
-        # ============================================================
+        elif matched and has_attachments:
+            # Text with bad word + attachments
+            fwd = forwarded_text(message)
+            if fwd:
+                quoted = "\n".join("> " + line for line in fwd.splitlines())
+                body = f"{body}\n{quoted}" if body else quoted
+            if message.stickers:
+                body += "\n*(stickers: " + ", ".join(s.name for s in message.stickers) + ")*"
+        elif not matched and has_attachments:
+            # Attachments only — no text
+            body = ""
 
         # ============================================================
-        # FETCH ONLY THE IMMEDIATE PARENT (NOT THE FULL CHAIN)
+        # FAST REPLY CONTEXT (only if actually a reply)
         # ============================================================
-        original_content = ""
-        original_author = ""
+        final_content = ""
         
-        if state == "known" and reply_message_id:
+        if state == "known" and reply_message_id and reply_author_id:
+            # Quick fetch — only if we need it
             try:
                 original_msg = await message.channel.fetch_message(reply_message_id)
                 original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
                 
-                if original_msg.reference and original_msg.reference.message_id:
-                    original_content = f"(replying to another message) {original_content}"
+                if matched:
+                    # Bad word + reply
+                    final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
+                else:
+                    # Attachments only + reply
+                    final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}** sent:"
             except (discord.NotFound, discord.HTTPException):
-                original_content = "[Message could not be fetched]"
-                original_author = "Unknown user"
-        elif state == "deleted":
-            original_content = "[The replied message was deleted]"
-            original_author = "Unknown user"
-        elif state == "unknown":
-            original_content = "[The replied message could not be accessed]"
-            original_author = "Unknown user"
-
-        # ============================================================
-        # BUILD CLEAN, COMPACT REPLY FORMAT
-        # ============================================================
-        final_content = ""
-        
-        if matched:
-            # Normal relay with filtered word
-            if state == "known" and reply_author_id:
-                final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
-            elif state == "deleted":
-                final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"
-            elif state == "unknown":
-                final_content = f"**[Message could not be fetched]**\n\n**{message.author.display_name}:** {body}"
-            else:
-                final_content = body
+                if matched:
+                    final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"
+                else:
+                    final_content = f"**[Deleted message]**\n\n**{message.author.display_name}** sent:"
         else:
-            # No filtered word — just show "sent an image/video" with attachments
-            if state == "known" and reply_author_id:
-                final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}** sent:"
-            elif state == "deleted":
-                final_content = f"**[Deleted message]**\n\n**{message.author.display_name}** sent:"
-            elif state == "unknown":
-                final_content = f"**[Message could not be fetched]**\n\n**{message.author.display_name}** sent:"
+            # No reply
+            if matched:
+                final_content = body
             else:
+                # Attachments only, no reply
                 final_content = f"**{message.author.display_name}** sent:"
 
         # ============================================================
-        # SPAM CHECK
+        # SPAM CHECK (quick)
         # ============================================================
         if is_spamming(message.author.id):
             try:
@@ -426,7 +427,9 @@ async def relay(message, matched):
             return
         # ============================================================
 
-        # Get or create the webhook
+        # ============================================================
+        # GET WEBHOOK (cached)
+        # ============================================================
         try:
             webhook = await get_or_create_webhook(message.channel)
         except (discord.Forbidden, discord.HTTPException):
@@ -442,7 +445,9 @@ async def relay(message, matched):
                 log.exception("fallback send also failed")
             return
 
-        # Send via webhook
+        # ============================================================
+        # SEND VIA WEBHOOK (NO DELAY)
+        # ============================================================
         try:
             await webhook.send(
                 content=final_content,

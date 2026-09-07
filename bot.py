@@ -351,52 +351,50 @@ async def relay(message, matched):
             return
 
         # ============================================================
-        # BUILD BODY TEXT — ALWAYS show text if there's a bad word
+        # BUILD BODY TEXT — ALWAYS include text if there's any
         # ============================================================
         body = message.content or ""
         has_attachments = bool(message.attachments)
         has_bad_word = bool(matched)
         
-        # Always process text if there's a bad word
-        if has_bad_word:
+        # Always process text if there's a bad word OR if there's no bad word but there are attachments
+        if has_bad_word or has_attachments:
             fwd = forwarded_text(message)
             if fwd:
                 quoted = "\n".join("> " + line for line in fwd.splitlines())
                 body = f"{body}\n{quoted}" if body else quoted
             if message.stickers:
                 body += "\n*(stickers: " + ", ".join(s.name for s in message.stickers) + ")*"
-        else:
-            # No bad word — only show text if there are no attachments
-            if not has_attachments:
-                body = message.content or ""
-            else:
-                body = ""
+        
+        # If no bad word and no attachments, and no text, it's an empty message — skip
+        if not body and not has_attachments and not has_bad_word:
+            return
 
         # ============================================================
         # FAST REPLY CONTEXT (ONLY immediate parent — NO chain)
         # ============================================================
         final_content = ""
         
+        # If there's a reply, fetch ONLY the immediate parent
         if state == "known" and reply_message_id and reply_author_id:
             try:
                 original_msg = await message.channel.fetch_message(reply_message_id)
                 original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
                 
-                if has_bad_word:
-                    # Bad word + reply
+                # Build the final content with reply context
+                if has_bad_word or body:
                     final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
                 else:
-                    # Attachments only + reply (no bad word)
                     final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}** sent:"
             except (discord.NotFound, discord.HTTPException):
-                if has_bad_word:
+                if has_bad_word or body:
                     final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"
                 else:
                     final_content = f"**[Deleted message]**\n\n**{message.author.display_name}** sent:"
         else:
             # No reply
-            if has_bad_word:
+            if has_bad_word or body:
                 # Show the text
                 final_content = body
             else:
@@ -432,7 +430,7 @@ async def relay(message, matched):
             log.exception("could not get/create webhook in #%s", message.channel)
             try:
                 await message.channel.send(
-                    f"📨 {message.author.display_name} sent:" if not has_bad_word else f"📨 {message.author.display_name} said:\n{final_content}",
+                    f"📨 {message.author.display_name} sent:" if not has_bad_word and not body else f"📨 {message.author.display_name} said:\n{final_content}",
                     files=files,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
@@ -456,7 +454,7 @@ async def relay(message, matched):
             log.exception("failed to send relay via webhook")
             try:
                 await message.channel.send(
-                    f"📨 {message.author.display_name} sent:" if not has_bad_word else f"📨 {message.author.display_name} said:\n{final_content}",
+                    f"📨 {message.author.display_name} sent:" if not has_bad_word and not body else f"📨 {message.author.display_name} said:\n{final_content}",
                     files=files,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )

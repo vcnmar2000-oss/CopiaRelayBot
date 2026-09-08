@@ -357,6 +357,13 @@ async def relay(message, matched):
         has_attachments = bool(message.attachments)
         has_bad_word = bool(matched)
         
+        # ============================================================
+        # MESSAGE LENGTH LIMIT — prevent spam walls
+        # ============================================================
+        MAX_MESSAGE_LENGTH = 400  # Max characters before truncation
+        if len(body) > MAX_MESSAGE_LENGTH:
+            body = body[:MAX_MESSAGE_LENGTH] + "... (truncated)"
+        
         # Always process text if there's a bad word OR if there's no bad word but there are attachments
         if has_bad_word or has_attachments:
             fwd = forwarded_text(message)
@@ -381,6 +388,11 @@ async def relay(message, matched):
                 original_msg = await message.channel.fetch_message(reply_message_id)
                 original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
+                
+                # Check if the parent was ALSO a reply — if so, we don't fetch its parent
+                if original_msg.reference and original_msg.reference.message_id:
+                    # Only show the parent, not the chain
+                    original_content = f"(replying to another message) {original_content}"
                 
                 # Build the final content with reply context
                 if has_bad_word or body:

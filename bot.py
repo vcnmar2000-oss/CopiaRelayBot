@@ -351,7 +351,7 @@ async def relay(message, matched):
             return
 
         # ============================================================
-        # BUILD BODY TEXT — ALWAYS include text if there's any
+        # BUILD BODY TEXT
         # ============================================================
         body = message.content or ""
         has_attachments = bool(message.attachments)
@@ -360,11 +360,11 @@ async def relay(message, matched):
         # ============================================================
         # MESSAGE LENGTH LIMIT — prevent spam walls
         # ============================================================
-        MAX_MESSAGE_LENGTH = 400  # Max characters before truncation
+        MAX_MESSAGE_LENGTH = 400
         if len(body) > MAX_MESSAGE_LENGTH:
             body = body[:MAX_MESSAGE_LENGTH] + "... (truncated)"
         
-        # Always process text if there's a bad word OR if there's no bad word but there are attachments
+        # Process forwarded/sticker content
         if has_bad_word or has_attachments:
             fwd = forwarded_text(message)
             if fwd:
@@ -373,40 +373,38 @@ async def relay(message, matched):
             if message.stickers:
                 body += "\n*(stickers: " + ", ".join(s.name for s in message.stickers) + ")*"
         
-        # If no bad word and no attachments, and no text, it's an empty message — skip
         if not body and not has_attachments and not has_bad_word:
             return
 
         # ============================================================
-        # FAST REPLY CONTEXT (ONLY immediate parent — clean content only)
+        # SIMPLE REPLY CONTEXT — just show the parent's CONTENT only
         # ============================================================
         final_content = ""
         
-        # If there's a reply, fetch ONLY the immediate parent
         if state == "known" and reply_message_id and reply_author_id:
             try:
                 original_msg = await message.channel.fetch_message(reply_message_id)
-                # Get the parent's content WITHOUT any reply context
+                # Get ONLY the parent's content — NOT its reply context
                 original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
                 
-                # ============================================================
-                # STRIP REPLY CONTEXT FROM PARENT — just show clean content
-                # ============================================================
-                # Remove common reply patterns like "@user:" or "Replying to @user"
-                cleaned_content = re.sub(r'^\s*@\w+:\s*', '', original_content)
-                cleaned_content = re.sub(r'^\s*Replying to @\w+:\s*', '', cleaned_content)
-                cleaned_content = re.sub(r'^\s*\(replying to another message\)\s*', '', cleaned_content)
+                # Check if the parent was replying to someone
+                is_nested_reply = original_msg.reference and original_msg.reference.message_id
                 
-                # If the cleaned content is empty, use a fallback
-                if not cleaned_content.strip():
-                    cleaned_content = "[No text content]"
-                
-                # Build the final content with reply context
+                # Build the final content
                 if has_bad_word or body:
-                    final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}:** {body}"
+                    if is_nested_reply:
+                        # Parent was a reply — show it with a simple note
+                        final_content = f"**@{original_author}:** {original_content}\n*(replying to another message)*\n\n**{message.author.display_name}:** {body}"
+                    else:
+                        # Parent was NOT a reply — clean and simple
+                        final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
                 else:
-                    final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}** sent:"
+                    # Attachments only
+                    if is_nested_reply:
+                        final_content = f"**@{original_author}:** {original_content}\n*(replying to another message)*\n\n**{message.author.display_name}** sent:"
+                    else:
+                        final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}** sent:"
             except (discord.NotFound, discord.HTTPException):
                 if has_bad_word or body:
                     final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"
@@ -415,14 +413,12 @@ async def relay(message, matched):
         else:
             # No reply
             if has_bad_word or body:
-                # Show the text
                 final_content = body
             else:
-                # Attachments only, no reply
                 final_content = f"**{message.author.display_name}** sent:"
 
         # ============================================================
-        # SPAM CHECK (quick)
+        # SPAM CHECK
         # ============================================================
         if is_spamming(message.author.id):
             try:
@@ -439,10 +435,9 @@ async def relay(message, matched):
                 )
                 await message.delete()
             return
-        # ============================================================
 
         # ============================================================
-        # GET WEBHOOK (cached)
+        # GET WEBHOOK
         # ============================================================
         try:
             webhook = await get_or_create_webhook(message.channel)
@@ -460,7 +455,7 @@ async def relay(message, matched):
             return
 
         # ============================================================
-        # SEND VIA WEBHOOK (NO DELAY)
+        # SEND VIA WEBHOOK
         # ============================================================
         try:
             await webhook.send(

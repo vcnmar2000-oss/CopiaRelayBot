@@ -339,11 +339,6 @@ async def relay(message, matched):
 
     async with channel_lock(message.channel.id):
         # ============================================================
-        # FAST PATH: Check if it's a reply
-        # ============================================================
-        state, reply_author_id, reply_message_id = await resolve_reply_target(message)
-
-        # ============================================================
         # COLLECT ATTACHMENTS (if any)
         # ============================================================
         files = await collect_attachments(message)
@@ -377,9 +372,9 @@ async def relay(message, matched):
             return
 
         # ============================================================
-        # CLEAN REPLY CONTENT — strip ALL Discord mentions properly
+        # STRIP ALL MENTIONS FROM TEXT
         # ============================================================
-        def clean_mentions(text):
+        def clean_text(text):
             """Remove ALL Discord mentions from text."""
             if not text:
                 return text
@@ -394,46 +389,33 @@ async def relay(message, matched):
             return text
 
         # ============================================================
-        # BUILD THE REPLY CONTEXT — SIMPLE AND CLEAN
+        # BUILD CONTENT — with clean context
         # ============================================================
         final_content = ""
         
-        if state == "known" and reply_message_id and reply_author_id:
+        # Check if this message is a reply
+        ref = message.reference
+        if ref and ref.message_id:
             try:
-                original_msg = await message.channel.fetch_message(reply_message_id)
-                original_author = original_msg.author.display_name
+                # Fetch ONLY the immediate parent
+                parent_msg = await message.channel.fetch_message(ref.message_id)
+                parent_author = parent_msg.author.display_name
+                parent_content = clean_text(parent_msg.content or "[No text content]")
                 
-                # Get parent content and CLEAN it
-                raw_content = original_msg.content or ""
-                cleaned_content = clean_mentions(raw_content)
-                
-                # If nothing left, use a fallback
-                if not cleaned_content:
-                    cleaned_content = "[No text content]"
-                
-                # Check if parent was also a reply
-                is_nested = original_msg.reference and original_msg.reference.message_id
-                
-                # Build the final content
+                # Build with context
                 if has_bad_word or body:
-                    if is_nested:
-                        final_content = f"**@{original_author}:** {cleaned_content} *(replying to another message)*\n\n**{message.author.display_name}:** {body}"
-                    else:
-                        final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}:** {body}"
+                    final_content = f"**{parent_author}:** {parent_content}\n\n**{message.author.display_name}:** {body}"
                 else:
-                    # Attachments only
-                    if is_nested:
-                        final_content = f"**@{original_author}:** {cleaned_content} *(replying to another message)*\n\n**{message.author.display_name}** sent:"
-                    else:
-                        final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}** sent:"
-                        
+                    final_content = f"**{parent_author}:** {parent_content}\n\n**{message.author.display_name}** sent:"
+                    
             except (discord.NotFound, discord.HTTPException):
+                # Parent couldn't be fetched
                 if has_bad_word or body:
-                    final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"
+                    final_content = body
                 else:
-                    final_content = f"**[Deleted message]**\n\n**{message.author.display_name}** sent:"
+                    final_content = f"**{message.author.display_name}** sent:"
         else:
-            # No reply
+            # Not a reply — just show the message
             if has_bad_word or body:
                 final_content = body
             else:

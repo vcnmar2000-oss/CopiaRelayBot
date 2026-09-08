@@ -377,16 +377,36 @@ async def relay(message, matched):
             return
 
         # ============================================================
-        # SIMPLE REPLY CONTEXT — just show the parent's CONTENT only
+        # STRIP MENTIONS FROM PARENT CONTENT
+        # ============================================================
+        def strip_mentions(text):
+            """Remove @mentions from text."""
+            # Remove <@userid> and <@!userid> patterns
+            text = re.sub(r'<@!?\d+>', '', text)
+            # Remove @username patterns
+            text = re.sub(r'@\w+', '', text)
+            # Clean up extra spaces
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text
+
+        # ============================================================
+        # SIMPLE REPLY CONTEXT — clean parent content
         # ============================================================
         final_content = ""
         
         if state == "known" and reply_message_id and reply_author_id:
             try:
                 original_msg = await message.channel.fetch_message(reply_message_id)
-                # Get ONLY the parent's content — NOT its reply context
+                # Get parent content and strip mentions
                 original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
+                
+                # Strip ALL mentions from the parent content
+                cleaned_content = strip_mentions(original_content)
+                
+                # If cleaned content is empty, use fallback
+                if not cleaned_content:
+                    cleaned_content = "[No text content]"
                 
                 # Check if the parent was replying to someone
                 is_nested_reply = original_msg.reference and original_msg.reference.message_id
@@ -394,17 +414,15 @@ async def relay(message, matched):
                 # Build the final content
                 if has_bad_word or body:
                     if is_nested_reply:
-                        # Parent was a reply — show it with a simple note
-                        final_content = f"**@{original_author}:** {original_content}\n*(replying to another message)*\n\n**{message.author.display_name}:** {body}"
+                        final_content = f"**@{original_author}:** {cleaned_content}\n*(replying to another message)*\n\n**{message.author.display_name}:** {body}"
                     else:
-                        # Parent was NOT a reply — clean and simple
-                        final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
+                        final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}:** {body}"
                 else:
                     # Attachments only
                     if is_nested_reply:
-                        final_content = f"**@{original_author}:** {original_content}\n*(replying to another message)*\n\n**{message.author.display_name}** sent:"
+                        final_content = f"**@{original_author}:** {cleaned_content}\n*(replying to another message)*\n\n**{message.author.display_name}** sent:"
                     else:
-                        final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}** sent:"
+                        final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}** sent:"
             except (discord.NotFound, discord.HTTPException):
                 if has_bad_word or body:
                     final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"

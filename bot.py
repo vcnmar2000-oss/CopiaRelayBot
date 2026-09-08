@@ -358,7 +358,7 @@ async def relay(message, matched):
         has_bad_word = bool(matched)
         
         # ============================================================
-        # MESSAGE LENGTH LIMIT — prevent spam walls
+        # MESSAGE LENGTH LIMIT
         # ============================================================
         MAX_MESSAGE_LENGTH = 400
         if len(body) > MAX_MESSAGE_LENGTH:
@@ -377,52 +377,56 @@ async def relay(message, matched):
             return
 
         # ============================================================
-        # STRIP MENTIONS FROM PARENT CONTENT
+        # CLEAN REPLY CONTENT — strip ALL Discord mentions properly
         # ============================================================
-        def strip_mentions(text):
-            """Remove @mentions from text."""
-            # Remove <@userid> and <@!userid> patterns
+        def clean_mentions(text):
+            """Remove ALL Discord mentions from text."""
+            if not text:
+                return text
+            # Remove <@userid> and <@!userid>
             text = re.sub(r'<@!?\d+>', '', text)
-            # Remove @username patterns
-            text = re.sub(r'@\w+', '', text)
+            # Remove @username (plain text mentions)
+            text = re.sub(r'@\S+', '', text)
+            # Remove any leftover ":" after stripped mentions
+            text = re.sub(r'\s*:\s*', ' ', text)
             # Clean up extra spaces
             text = re.sub(r'\s+', ' ', text).strip()
             return text
 
         # ============================================================
-        # SIMPLE REPLY CONTEXT — clean parent content
+        # BUILD THE REPLY CONTEXT — SIMPLE AND CLEAN
         # ============================================================
         final_content = ""
         
         if state == "known" and reply_message_id and reply_author_id:
             try:
                 original_msg = await message.channel.fetch_message(reply_message_id)
-                # Get parent content and strip mentions
-                original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
                 
-                # Strip ALL mentions from the parent content
-                cleaned_content = strip_mentions(original_content)
+                # Get parent content and CLEAN it
+                raw_content = original_msg.content or ""
+                cleaned_content = clean_mentions(raw_content)
                 
-                # If cleaned content is empty, use fallback
+                # If nothing left, use a fallback
                 if not cleaned_content:
                     cleaned_content = "[No text content]"
                 
-                # Check if the parent was replying to someone
-                is_nested_reply = original_msg.reference and original_msg.reference.message_id
+                # Check if parent was also a reply
+                is_nested = original_msg.reference and original_msg.reference.message_id
                 
                 # Build the final content
                 if has_bad_word or body:
-                    if is_nested_reply:
-                        final_content = f"**@{original_author}:** {cleaned_content}\n*(replying to another message)*\n\n**{message.author.display_name}:** {body}"
+                    if is_nested:
+                        final_content = f"**@{original_author}:** {cleaned_content} *(replying to another message)*\n\n**{message.author.display_name}:** {body}"
                     else:
                         final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}:** {body}"
                 else:
                     # Attachments only
-                    if is_nested_reply:
-                        final_content = f"**@{original_author}:** {cleaned_content}\n*(replying to another message)*\n\n**{message.author.display_name}** sent:"
+                    if is_nested:
+                        final_content = f"**@{original_author}:** {cleaned_content} *(replying to another message)*\n\n**{message.author.display_name}** sent:"
                     else:
                         final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}** sent:"
+                        
             except (discord.NotFound, discord.HTTPException):
                 if has_bad_word or body:
                     final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"

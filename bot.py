@@ -378,7 +378,7 @@ async def relay(message, matched):
             return
 
         # ============================================================
-        # FAST REPLY CONTEXT (ONLY immediate parent — NO chain)
+        # FAST REPLY CONTEXT (ONLY immediate parent — clean content only)
         # ============================================================
         final_content = ""
         
@@ -386,19 +386,27 @@ async def relay(message, matched):
         if state == "known" and reply_message_id and reply_author_id:
             try:
                 original_msg = await message.channel.fetch_message(reply_message_id)
+                # Get the parent's content WITHOUT any reply context
                 original_content = original_msg.content or "[No text content]"
                 original_author = original_msg.author.display_name
                 
-                # Check if the parent was ALSO a reply — if so, we don't fetch its parent
-                if original_msg.reference and original_msg.reference.message_id:
-                    # Only show the parent, not the chain
-                    original_content = f"(replying to another message) {original_content}"
+                # ============================================================
+                # STRIP REPLY CONTEXT FROM PARENT — just show clean content
+                # ============================================================
+                # Remove common reply patterns like "@user:" or "Replying to @user"
+                cleaned_content = re.sub(r'^\s*@\w+:\s*', '', original_content)
+                cleaned_content = re.sub(r'^\s*Replying to @\w+:\s*', '', cleaned_content)
+                cleaned_content = re.sub(r'^\s*\(replying to another message\)\s*', '', cleaned_content)
+                
+                # If the cleaned content is empty, use a fallback
+                if not cleaned_content.strip():
+                    cleaned_content = "[No text content]"
                 
                 # Build the final content with reply context
                 if has_bad_word or body:
-                    final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}:** {body}"
+                    final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}:** {body}"
                 else:
-                    final_content = f"**@{original_author}:** {original_content}\n\n**{message.author.display_name}** sent:"
+                    final_content = f"**@{original_author}:** {cleaned_content}\n\n**{message.author.display_name}** sent:"
             except (discord.NotFound, discord.HTTPException):
                 if has_bad_word or body:
                     final_content = f"**[Deleted message]**\n\n**{message.author.display_name}:** {body}"

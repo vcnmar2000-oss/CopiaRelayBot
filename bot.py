@@ -29,7 +29,7 @@ MAX_RELAY_BYTES = 25 * 1024 * 1024
 DENIAL_COOLDOWN = 30.0
 
 # ============================================================
-# SPAM TRACKING — optimized for speed
+# SPAM TRACKING — filtered-word spam (existing logic)
 # ============================================================
 spam_tracker = defaultdict(list)
 SPAM_WINDOW = 180   # 3 minutes
@@ -37,19 +37,40 @@ SPAM_LIMIT = 10     # 10 filtered messages per 3 minutes
 TIMEOUT_MINUTES = 3 # 3-minute timeout
 
 def is_spamming(user_id):
-    """Returns True if user has exceeded the spam limit."""
+    """Returns True if user has exceeded the filtered-word spam limit."""
     now = time.time()
-    # Fast cleanup
     user_times = spam_tracker.get(user_id)
     if user_times:
-        # Only clean if we need to
         cutoff = now - SPAM_WINDOW
         spam_tracker[user_id] = [t for t in user_times if t > cutoff]
-    
     if len(spam_tracker[user_id]) >= SPAM_LIMIT:
         return True
-    
     spam_tracker[user_id].append(now)
+    return False
+
+# ============================================================
+# UNIVERSAL RELAY RATE LIMIT — protects against any flood
+# (memes, images, bad words — everything counts)
+# Tuned for a busy/toxic server: normal chaos is NOT throttled,
+# but a raider running a flood gets stopped fast.
+# Staff (AUTHORIZED_USER_IDS) bypass this entirely.
+# ============================================================
+relay_times = defaultdict(list)
+RELAY_WINDOW = 30     # 30-second sliding window
+RELAY_LIMIT = 12      # max 12 relays per 30s per user (~1 every 2.5s)
+
+def relay_rate_limited(user_id):
+    """Returns True if this user should be skipped (rate-limited)."""
+    # Staff can never be rate-limited — they may need to spam-test, etc.
+    if user_id in AUTHORIZED_USER_IDS:
+        return False
+    now = time.time()
+    cutoff = now - RELAY_WINDOW
+    times = [t for t in relay_times[user_id] if t > cutoff]
+    relay_times[user_id] = times
+    if len(times) >= RELAY_LIMIT:
+        return True
+    times.append(now)
     return False
 # ============================================================
 
@@ -110,9 +131,7 @@ class WordStore:
         self._pattern = self._compile(self.words)
 
     def _write(self, words):
-        # FIX: ensure the parent folder exists (the /data volume)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # FIX: with_suffix(".json.tmp") is invalid — use with_name instead
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(
             json.dumps({"words": words}, ensure_ascii=False, indent=2),
@@ -340,29 +359,26 @@ async def relay(message, matched):
         log.warning("not relaying a message in #%s: %s", message.channel, blocked)
         return
 
+    # ============================================================
+    # UNIVERSAL RATE LIMIT — checked before any work is done
+    # ============================================================
+    if relay_rate_limited(message.author.id):
+        log.info("rate-limited %s in #%s", message.author, message.channel)
+        return
+
     async with channel_lock(message.channel.id):
-        # ============================================================
-        # COLLECT ATTACHMENTS (if any)
-        # ============================================================
         files = await collect_attachments(message)
         if files is None:
             return
 
-        # ============================================================
-        # BUILD BODY TEXT
-        # ============================================================
         body = message.content or ""
         has_attachments = bool(message.attachments)
         has_bad_word = bool(matched)
-        
-        # ============================================================
-        # MESSAGE LENGTH LIMIT
-        # ============================================================
+
         MAX_MESSAGE_LENGTH = 400
         if len(body) > MAX_MESSAGE_LENGTH:
             body = body[:MAX_MESSAGE_LENGTH] + "... (truncated)"
-        
-        # Process forwarded/sticker content
+
         if has_bad_word or has_attachments:
             fwd = forwarded_text(message)
             if fwd:
@@ -370,64 +386,83 @@ async def relay(message, matched):
                 body = f"{body}\n{quoted}" if body else quoted
             if message.stickers:
                 body += "\n*(stickers: " + ", ".join(s.name for s in message.stickers) + ")*"
-        
+
         if not body and not has_attachments and not has_bad_word:
             return
 
         # ============================================================
         # STRIP ALL MENTIONS FROM TEXT
         # ============================================================
+        _mention_re = re.compile(r'<@!?\d+>')
+        _at_re = re.compile(r'@\S+')
+        _colon_re = re.compile(r'\s*:\s*')
+        _ws_re = re.compile(r'\s+')
+
         def clean_text(text):
-            """Remove ALL Discord mentions from text."""
             if not text:
                 return text
-            # Remove <@userid> and <@!userid>
-            text = re.sub(r'<@!?\d+>', '', text)
-            # Remove @username (plain text mentions)
-            text = re.sub(r'@\S+', '', text)
-            # Remove any leftover ":" after stripped mentions
-            text = re.sub(r'\s*:\s*', ' ', text)
-            # Clean up extra spaces
-            text = re.sub(r'\s+', ' ', text).strip()
+            text = _mention_re.sub('', text)
+            text = _at_re.sub('', text)
+            text = _colon_re.sub(' ', text)
+            text = _ws_re.sub(' ', text).strip()
             return text
 
         # ============================================================
-        # BUILD CONTENT — with clean context
+        # BUILD CONTENT — compact quote-style reply context
         # ============================================================
+        MAX_QUOTE_LEN = 100
+
+        def short(text, limit=MAX_QUOTE_LEN):
+            text = clean_text(text or "")
+            if len(text) > limit:
+                text = text[:limit].rstrip() + "…"
+            return text
+
         final_content = ""
-        
-        # Check if this message is a reply
+
         ref = message.reference
         if ref and ref.message_id:
-            try:
-                # Fetch ONLY the immediate parent
-                parent_msg = await message.channel.fetch_message(ref.message_id)
-                parent_author = parent_msg.author.display_name
-                parent_content = clean_text(parent_msg.content or "[No text content]")
-                
-                # Build with context
-                if has_bad_word or body:
-                    final_content = f"**{parent_author}:** {parent_content}\n\n**{message.author.display_name}:** {body}"
+            # Try cached parent first (no API call = fast).
+            parent = ref.resolved
+            if not isinstance(parent, discord.Message):
+                try:
+                    parent = await message.channel.fetch_message(ref.message_id)
+                except (discord.NotFound, discord.HTTPException):
+                    parent = None
+
+            if parent is not None:
+                parent_author = parent.author.display_name
+                parent_text = short(parent.content)
+                has_image = bool(parent.attachments)
+
+                if parent_text:
+                    quote = f'↳ **{parent_author}**: *"{parent_text}"*'
+                elif has_image:
+                    quote = f"↳ **{parent_author}** sent an attachment"
                 else:
-                    final_content = f"**{parent_author}:** {parent_content}\n\n**{message.author.display_name}** sent:"
-                    
-            except (discord.NotFound, discord.HTTPException):
-                # Parent couldn't be fetched
-                if has_bad_word or body:
-                    final_content = body
+                    quote = f"↳ **{parent_author}**"
+
+                if body:
+                    final_content = f"{quote}\n\n{body}"
                 else:
-                    final_content = f"**{message.author.display_name}** sent:"
-        else:
-            # Not a reply — just show the message
-            if has_bad_word or body:
-                final_content = body
+                    final_content = quote
             else:
-                final_content = f"**{message.author.display_name}** sent:"
+                final_content = body
+        else:
+            final_content = body
+
+        if not final_content and not has_attachments:
+            final_content = f"**{message.author.display_name}** sent an attachment"
+
+        if len(final_content) > MAX_MESSAGE_LENGTH:
+            final_content = final_content[:MAX_MESSAGE_LENGTH].rstrip() + "…"
 
         # ============================================================
-        # SPAM CHECK
+        # FILTERED-WORD SPAM CHECK (timeout logic, unchanged)
         # ============================================================
         if is_spamming(message.author.id):
+            # Clear their counter so they don't stay "at the limit"
+            spam_tracker.pop(message.author.id, None)
             try:
                 await message.author.timeout(timedelta(minutes=TIMEOUT_MINUTES))
                 await message.channel.send(
@@ -484,7 +519,6 @@ async def relay(message, matched):
                 log.exception("fallback send also failed")
                 return
 
-        # Delete the original message
         try:
             await message.delete()
         except discord.NotFound:
@@ -521,17 +555,12 @@ async def on_message(message):
         return
     if message.content.startswith(PREFIX):
         return
-    
-    # ============================================================
-    # CHECK FOR FILTERED WORDS OR ATTACHMENTS
-    # ============================================================
+
     matched = store.find(scannable_text(message))
     has_attachments = bool(message.attachments)
-    
-    # Relay if: (message has a bad word) OR (message has images/videos)
+
     if matched or has_attachments:
         await relay(message, matched)
-    # ============================================================
 
 
 @bot.event

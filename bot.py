@@ -22,7 +22,7 @@ AUTHORIZED_USER_IDS = {
     1414684138996236344,  # Your alt account
 }
 
-WORDS_PATH = Path(__file__).with_name("words.json")
+WORDS_PATH = Path(os.getenv("WORDS_PATH", "/data/words.json"))
 MAX_WORD_LEN = 100
 MESSAGE_LIMIT = 2000
 MAX_RELAY_BYTES = 25 * 1024 * 1024
@@ -110,7 +110,10 @@ class WordStore:
         self._pattern = self._compile(self.words)
 
     def _write(self, words):
-        tmp = self.path.with_suffix(".json.tmp")
+        # FIX: ensure the parent folder exists (the /data volume)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # FIX: with_suffix(".json.tmp") is invalid — use with_name instead
+        tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(
             json.dumps({"words": words}, ensure_ascii=False, indent=2),
             encoding="utf-8",

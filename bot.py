@@ -51,8 +51,6 @@ def is_spamming(user_id):
 # ============================================================
 # UNIVERSAL RELAY RATE LIMIT — protects against any flood
 # (memes, images, bad words — everything counts)
-# Tuned for a busy/toxic server: normal chaos is NOT throttled,
-# but a raider running a flood gets stopped fast.
 # Staff (AUTHORIZED_USER_IDS) bypass this entirely.
 # ============================================================
 relay_times = defaultdict(list)
@@ -61,7 +59,6 @@ RELAY_LIMIT = 12      # max 12 relays per 30s per user (~1 every 2.5s)
 
 def relay_rate_limited(user_id):
     """Returns True if this user should be skipped (rate-limited)."""
-    # Staff can never be rate-limited — they may need to spam-test, etc.
     if user_id in AUTHORIZED_USER_IDS:
         return False
     now = time.time()
@@ -359,9 +356,6 @@ async def relay(message, matched):
         log.warning("not relaying a message in #%s: %s", message.channel, blocked)
         return
 
-    # ============================================================
-    # UNIVERSAL RATE LIMIT — checked before any work is done
-    # ============================================================
     if relay_rate_limited(message.author.id):
         log.info("rate-limited %s in #%s", message.author, message.channel)
         return
@@ -412,8 +406,18 @@ async def relay(message, matched):
         # ============================================================
         MAX_QUOTE_LEN = 100
 
+        _relay_quote_re = re.compile(r'^↳ \*\*[^*]+\*\*.*$', re.MULTILINE)
+
+        def strip_relay_quotes(text):
+            """Remove any existing ↳ relay-quote lines so chains never nest."""
+            if not text:
+                return text
+            cleaned = _relay_quote_re.sub('', text)
+            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+            return cleaned
+
         def short(text, limit=MAX_QUOTE_LEN):
-            text = clean_text(text or "")
+            text = strip_relay_quotes(clean_text(text or ""))
             if len(text) > limit:
                 text = text[:limit].rstrip() + "…"
             return text
@@ -422,7 +426,6 @@ async def relay(message, matched):
 
         ref = message.reference
         if ref and ref.message_id:
-            # Try cached parent first (no API call = fast).
             parent = ref.resolved
             if not isinstance(parent, discord.Message):
                 try:
@@ -461,7 +464,6 @@ async def relay(message, matched):
         # FILTERED-WORD SPAM CHECK (timeout logic, unchanged)
         # ============================================================
         if is_spamming(message.author.id):
-            # Clear their counter so they don't stay "at the limit"
             spam_tracker.pop(message.author.id, None)
             try:
                 await message.author.timeout(timedelta(minutes=TIMEOUT_MINUTES))
